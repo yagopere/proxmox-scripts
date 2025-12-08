@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Proxmox VE — Open WebUI + Ollama LXC (v4.1 — финальная, с v0.3.1 Ollama)
-# Запуск: curl -fsSL https://raw.githubusercontent.com/yagopere/proxmox-scripts/main/ollama-webui-lxc-v4.sh | bash
+# Proxmox VE — Open WebUI + Ollama LXC (v5.0 — финальная версия, декабрь 2025)
+# Работает на Proxmox 8.4 + local-zfs + vmbr0
+# Устанавливает Ollama v0.13.2 (latest)
+# Запуск: curl -fsSL https://raw.githubusercontent.com/yagopere/proxmox-scripts/main/ollama-webui-lxc.sh | bash
 # =============================================================================
 
 set -euo pipefail
@@ -13,12 +15,13 @@ echo -e "\033[1;36m
  / / / / __ \/ _ \/ __ \    | | /| / / _ \/ __ \/ / / // /
 / /_/ / /_/ /  __/ / / /    | |/ |/ /  __/ /_/ / /_/ // /
 \____/ .___/\___/_/ /_/     |__/|__/\___/_.___/\____/___/
-    /_/           Open WebUI + Ollama LXC (v4.1)
+    /_/           Open WebUI + Ollama LXC (v5.0)
 \033[0m"
 
 CTID=$(pvesh get /cluster/nextid)
 STORAGE="local-zfs"
 BRIDGE="vmbr0"
+OLLAMA_VERSION="v0.13.2"
 
 ip link show "$BRIDGE" &>/dev/null || { echo "Bridge $BRIDGE не найден!"; exit 1; }
 
@@ -42,60 +45,54 @@ pct create "$CTID" "local:vztmpl/$TEMPLATE_NAME" \
 
 echo "Устанавливаю всё внутри контейнера..."
 
-pct exec "$CTID" -- bash -c '
+pct exec "$CTID" -- bash -c "
   set -euo pipefail
 
-  # 1. Устанавливаем curl и зависимости (первым делом!)
-  echo "Устанавливаю curl..."
+  # 1. Обновляем apt и ставим curl + wget
   apt update -y
-  apt install -y curl ca-certificates gnupg lsb-release wget
+  apt install -y curl wget ca-certificates gnupg lsb-release
 
   # 2. Docker
-  echo "Устанавливаю Docker..."
   curl -fsSL https://get.docker.com | sh
 
-  # 3. Ollama v0.3.1 с GitHub (актуальная версия)
-  echo "Устанавливаю Ollama v0.3.1..."
-  wget -qO- https://github.com/ollama/ollama/releases/download/v0.3.1/ollama-linux-amd64.tgz \
+  # 3. Ollama v0.13.2 с GitHub
+  echo 'Устанавливаю Ollama $OLLAMA_VERSION...'
+  wget -qO- https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION/ollama-linux-amd64.tgz \
     | tar -xzf - -C /usr/local
   ln -sf /usr/local/bin/ollama /usr/bin/ollama
 
   # 4. systemd-сервис
-  cat > /etc/systemd/system/ollama.service << "EOF"
+  cat > /etc/systemd/system/ollama.service << EOF
 [Unit]
 Description=Ollama Service
 After=network-online.target
+
 [Service]
 ExecStart=/usr/local/bin/ollama serve
 Restart=always
 RestartSec=3
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment=\"PATH=/usr/local/bin:/usr/bin:/bin\"
+
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now ollama
 
-  # 5. Ждём запуска (проверяем curl)
-  echo "Запускаю Ollama..."
-  sleep 15
-  if ! curl -s http://127.0.0.1:11434 | grep -q "Ollama is running"; then
-    echo "Ollama не запустился, перезапускаю..."
-    systemctl restart ollama
-    sleep 10
-    if ! curl -s http://127.0.0.1:11434 | grep -q "Ollama is running"; then
-      echo "Ошибка запуска Ollama! Проверьте логи: journalctl -u ollama"
-      exit 1
+  # 5. Ждём запуска Ollama (проверяем curl)
+  echo 'Жду запуска Ollama...'
+  for i in {1..20}; do
+    if curl -s http://127.0.0.1:11434 | grep -q 'Ollama is running'; then
+      break
     fi
-  fi
-  echo "Ollama запущен!"
+    sleep 3
+  done
+  curl -s http://127.0.0.1:11434 | grep -q 'Ollama is running' || { echo 'Ollama не запустился!'; exit 1; }
 
   # 6. Модель
-  echo "Скачиваю модель llama3.2:3b..."
   ollama pull llama3.2:3b
 
   # 7. Open WebUI
-  echo "Запускаю Open WebUI..."
   mkdir -p /var/lib/open-webui
   chown 1000:1000 /var/lib/open-webui
   docker run -d --network=host \
@@ -103,7 +100,7 @@ EOF
     -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     --name open-webui --restart unless-stopped \
     ghcr.io/open-webui/open-webui:main
-'
+"
 
 pct reboot "$CTID" &>/dev/null
 
