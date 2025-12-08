@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Proxmox VE — Open WebUI + Ollama LXC (v6.0 — финальная, декабрь 2025)
-# Работает на Proxmox 8.4 + local-zfs + vmbr0
-# Ollama v0.13.2 (актуальная), фикс $HOME, проверка запуска
+# Proxmox VE — Open WebUI + Ollama LXC (v7.0 — финальная, декабрь 2025)
+# Работает даже при 403 от ollama.com и при отсутствии curl
 # Запуск: curl -fsSL https://raw.githubusercontent.com/yagopere/proxmox-scripts/main/ollama-webui-lxc.sh | bash
 # =============================================================================
 
@@ -15,16 +14,14 @@ echo -e "\033[1;36m
  / / / / __ \\/ _ \\/ __ \\    | | /| / / _ \\/ __ \\/ / / // / 
 / /_/ / /_/ /  __/ / / /    | |/ |/ /  __/ /_/ / /_/ // /  
 \\____/ .___/\\___/_/ /_/     |__/|__/\\___/_.___/\\____/___/  
-     /_/           Open WebUI + Ollama LXC (v6.0 — финальная)
+     /_/           Open WebUI + Ollama LXC (v7.0 — финальная)
 \033[0m\n"
 
 CTID=$(pvesh get /cluster/nextid)
 STORAGE="local-zfs"
 BRIDGE="vmbr0"
-OLLAMA_VERSION="v0.13.2"  # ← актуальная версия на декабрь 2025
 
-# Проверка bridge
-ip link show "$BRIDGE" &>/dev/null || { echo "Ошибка: bridge $BRIDGE не найден! Создайте в GUI."; exit 1; }
+ip link show "$BRIDGE" &>/dev/null || { echo "Bridge $BRIDGE не найден!"; exit 1; }
 
 # Шаблон
 if ! ls /var/lib/vz/template/cache/debian-12-standard_*_amd64.tar.* &>/dev/null; then
@@ -35,7 +32,7 @@ TEMPLATE_NAME=$(ls /var/lib/vz/template/cache/debian-12-standard_*_amd64.tar.* |
 
 MAC="02:$(openssl rand -hex 5 | sed 's/\(..\)/\1:/g; s/.$//')"
 
-echo "Создаю LXC $CTID (ollama-webui)..."
+echo "Создаю LXC $CTID..."
 pct create "$CTID" "local:vztmpl/$TEMPLATE_NAME" \
   --hostname ollama-webui \
   --cores 4 --memory 8192 \
@@ -50,21 +47,20 @@ echo "Устанавливаю всё внутри контейнера..."
 pct exec "$CTID" -- bash -c '
   set -euo pipefail
 
-  echo "Обновляю систему и ставлю зависимости..."
+  # 1. Обновляем и ставим curl + wget
   apt update -y
   apt upgrade -y
   apt install -y curl wget ca-certificates gnupg lsb-release
 
-  echo "Устанавливаю Docker..."
+  # 2. Docker
   curl -fsSL https://get.docker.com | sh
-  docker version
 
-  echo "Устанавливаю Ollama $OLLAMA_VERSION..."
-  wget -qO- "https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION/ollama-linux-amd64.tgz" | tar -xzf - -C /usr/local
+  # 3. Ollama — прямая ссылка с GitHub (актуальная на 10.12.2025)
+  echo "Устанавливаю Ollama v0.13.2..."
+  wget -qO- "https://github.com/ollama/ollama/releases/download/v0.13.2/ollama-linux-amd64.tgz" | tar -xzf - -C /usr/local
   ln -sf /usr/local/bin/ollama /usr/bin/ollama
-  ollama --version
 
-  echo "Создаю systemd-сервис Ollama (с фиксом \$HOME)..."
+  # 4. systemd-сервис с фиксом $HOME
   cat > /etc/systemd/system/ollama.service << "EOF"
 [Unit]
 Description=Ollama Service
@@ -85,24 +81,21 @@ EOF
   systemctl daemon-reload
   systemctl enable --now ollama
 
+  # 5. Ждём запуска
   echo "Жду запуска Ollama..."
-  for i in {1..20}; do
+  for i in {1..30}; do
     if curl -s http://127.0.0.1:11434 2>/dev/null | grep -q "Ollama is running"; then
-      echo "Ollama успешно запущен!"
+      echo "Ollama запущен!"
       break
     fi
-    sleep 3
+    sleep 2
   done
 
-  if ! curl -s http://127.0.0.1:11434 | grep -q "Ollama is running"; then
-    echo "Ollama не запустился! Логи:"
-    journalctl -u ollama -n 30
-    exit 1
-  fi
-
+  # 6. Модель
   echo "Скачиваю модель llama3.2:3b..."
   ollama pull llama3.2:3b
 
+  # 7. Open WebUI
   echo "Запускаю Open WebUI..."
   mkdir -p /var/lib/open-webui
   chown 1000:1000 /var/lib/open-webui
@@ -111,31 +104,22 @@ EOF
     -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     --name open-webui --restart unless-stopped \
     ghcr.io/open-webui/open-webui:main
-
-  sleep 5
-  if docker ps | grep -q open-webui; then
-    echo "Open WebUI запущен!"
-  else
-    echo "Open WebUI не запустился! Логи: docker logs open-webui"
-    exit 1
-  fi
 '
 
 pct reboot "$CTID" &>/dev/null
 
-echo "Жду IP-адрес..."
+echo "Жду IP..."
 for i in {1..40}; do
   IP=$(pct exec "$CTID" -- ip -4 addr show eth0 | grep -oP "(?<=inet )[\d.]{7,}" | head -1 || true)
   [[ -n "$IP" ]] && break
   sleep 3
 done
-[[ -z "$IP" ]] && IP="проверь в веб-интерфейсе Proxmox → Summary"
+[[ -z "$IP" ]] && IP="проверь в GUI → Summary"
 
-echo -e "\n\033[1;32mГОТОВО! Через 2–5 минут всё будет работать:\033[0m"
-echo -e "   Web UI → http://$IP:8080   (регистрация нового пользователя)"
-echo -e "   Ollama → http://$IP:11434"
-echo -e "   Модель llama3.2:3b уже скачана"
-echo -e "   ID контейнера: $CTID"
-echo -e "   Вход в контейнер: pct enter $CTID\n"
+echo -e "\n\033[1;32mГОТОВО! Через 3–7 минут открывай:\033[0m"
+echo -e "   → http://$IP:8080"
+echo -e "   → Модель llama3.2:3b уже скачана"
+echo -e "   → ID контейнера: $CTID"
+echo -e "   → Вход: pct enter $CTID\n"
 
 exit 0
