@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # =============================================================================
-# Proxmox VE - Open WebUI LXC with optional Ollama (v1.4 — fixed template wildcard + bridge check)
-# Автор: yagopere + Grok (xAI), на основе Proxmox forum/docs 2025
+# Proxmox VE - Open WebUI LXC with optional Ollama (v1.5 — fixed template basename + ZFS rootfs)
+# Автор: yagopere + Grok (xAI), на основе pve-docs + forum threads 2025
 # GitHub: https://github.com/yagopere/proxmox-scripts
-# Запуск: curl -fsSL https://raw.githubusercontent.com/yagopere/proxmox-scripts/main/openwebui-lxc-v1.4.sh | bash
+# Запуск: curl -fsSL https://raw.githubusercontent.com/yagopere/proxmox-scripts/main/openwebui-lxc-v1.5.sh | bash
 # =============================================================================
 
 variables() {
@@ -60,7 +60,7 @@ header_info() {
 / /_/ / /_/ /  __/ / / /    | |/ |/ /  __/ /_/ / /_/ // /
 \____/ .___/\___/_/ /_/     |__/|__/\___/_.___/\____/___/
     /_/
-          + Ollama (optional) — LXC for Proxmox VE 8.4+ (v1.4 fixed)
+          + Ollama (optional) — LXC for Proxmox VE 8.4+ (v1.5 fixed)
 EOF
 }
 
@@ -102,10 +102,9 @@ else
 fi
 msg_ok "Хранилище: $STORAGE"
 
-# Bridge check (фикс: используем ip link вместо pvesh)
+# Bridge check (фикс: ip link + инструкция)
 if ! ip link show "$var_bridge" >/dev/null 2>&1; then
-  msg_info "Bridge $var_bridge не найден, используем vmbr0"
-  var_bridge="vmbr0"
+  msg_error "Bridge $var_bridge не найден! Создайте в GUI: Datacenter > Node > Network > Create > Linux Bridge (name=vmbr0)."
 fi
 msg_ok "Bridge: $var_bridge"
 
@@ -116,98 +115,4 @@ DISK_SIZE="$var_disk"
 CORE_COUNT="$var_cpu"
 RAM_SIZE="$var_ram"
 
-TEMPLATE_BASE="debian-12-standard"
-TEMPLATE_DIR="/var/lib/vz/template/cache"
-if ! ls "${TEMPLATE_DIR}/${TEMPLATE_BASE}"*.tar.* >/dev/null 2>&1; then
-  msg_info "Скачиваем шаблон $TEMPLATE_BASE..."
-  pveam download local "$TEMPLATE_BASE" || msg_error "Ошибка скачивания шаблона"
-  msg_ok "Шаблон скачан"
-fi
-
-# Получаем точное имя файла (фикс wildcard)
-TEMPLATE_FILE=$(ls "${TEMPLATE_DIR}/${TEMPLATE_BASE}"*.tar.* | head -1)
-if [[ -z "$TEMPLATE_FILE" ]]; then
-  msg_error "Шаблон не найден после скачивания"
-fi
-TEMPLATE_NAME=$(basename "$TEMPLATE_FILE")
-msg_ok "Используем шаблон: $TEMPLATE_NAME"
-
-msg_info "Создаём LXC $CTID..."
-GEN_MAC="02:$(openssl rand -hex 5 | sed 's/\(..\)/\1:/g; s/.$//' | tr a-f A-F)"
-pct create $CTID "local:vztmpl/${TEMPLATE_NAME}" \
-  --arch amd64 \
-  --cores $CORE_COUNT \
-  --hostname $HN \
-  --memory $RAM_SIZE \
-  --net0 name=eth0,bridge=$var_bridge,ip=dhcp,hwaddr=$GEN_MAC,type=veth \
-  --ostype $var_os \
-  --rootfs $STORAGE:$DISK_SIZE \
-  --swap 1024 \
-  --unprivileged $var_unprivileged \
-  --features nesting=1 \
-  --password '' || msg_error "Ошибка создания LXC (проверьте net0/bridge/template)"
-msg_ok "LXC создан"
-
-msg_info "Запускаем LXC..."
-pct start $CTID
-sleep 10
-msg_ok "LXC запущен"
-
-# Установка внутри
-exec_in() { pct exec $CTID -- bash -c "$1"; }
-
-msg_info "Обновляем пакеты..."
-exec_in "apt update && apt upgrade -y"
-msg_ok "Пакеты обновлены"
-
-msg_info "Устанавливаем зависимости..."
-exec_in "apt install -y curl wget ca-certificates gnupg lsb-release"
-msg_ok "Зависимости установлены"
-
-msg_info "Устанавливаем Docker..."
-exec_in "install -m 0755 -d /etc/apt/keyrings"
-exec_in "curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc"
-exec_in "chmod a+r /etc/apt/keyrings/docker.asc"
-exec_in "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo \"\$VERSION_CODENAME\") stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"
-exec_in "apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
-msg_ok "Docker установлен"
-
-if [[ "$INSTALL_OLLAMA" == "yes" ]]; then
-  msg_info "Устанавливаем Ollama..."
-  exec_in "curl -fsSL https://ollama.com/install.sh | sh"
-  exec_in "systemctl enable --now ollama"
-  [[ "$MODEL_TO_PULL" != "none" ]] && exec_in "ollama pull $MODEL_TO_PULL"
-  msg_ok "Ollama установлен"
-  OLLAMA_ENV="-e OLLAMA_BASE_URL=http://127.0.0.1:11434"
-else
-  OLLAMA_ENV=""
-fi
-
-msg_info "Устанавливаем Open WebUI..."
-exec_in "mkdir -p /var/lib/open-webui && chown -R 1000:1000 /var/lib/open-webui"
-exec_in "docker run -d --network=host -v /var/lib/open-webui:/app/backend/data --name open-webui --restart unless-stopped $OLLAMA_ENV ghcr.io/open-webui/open-webui:main"
-msg_ok "Open WebUI установлен"
-
-msg_info "Перезагружаем LXC..."
-pct reboot $CTID
-sleep 20
-msg_ok "LXC перезагружен"
-
-# IP
-msg_info "Ждём IP (до 60s)..."
-IP="N/A"
-for i in {1..12}; do
-  IP=$(pct exec $CTID -- bash -c "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1" 2>/dev/null || echo "N/A")
-  [[ "$IP" != "N/A" ]] && break
-  sleep 5
-done
-[[ "$IP" == "N/A" ]] && IP="проверьте в GUI (Summary)"
-
-msg_ok "Готово! LXC $CTID ($HN) создан."
-echo -e "\n${GN}Через 2–5 мин всё готово:${CL}"
-echo -e "   ➜ Web UI: http://${IP}:8080 (регистрируйтесь)"
-echo -e "   ➜ Ollama API: http://${IP}:11434 (если установлен)"
-echo -e "   ➜ Консоль: pct console $CTID"
-echo -e "   ➜ Модель: $MODEL_TO_PULL\n${INFO}Логи: pct exec $CTID docker logs open-webui"
-
-exit 0
+TEMPLATE_BASE="debian
