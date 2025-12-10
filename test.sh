@@ -6,7 +6,7 @@
 # =============================================
 
 # Настройки
-LXC_NAME="ollama-webui"
+LXC_NAME="ollama-webui1"
 LXC_VMID=9999  # Уникальный номер VM в Proxmox
 LXC_CPU="2"
 LXC_RAM="4G"
