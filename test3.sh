@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Proxmox VE — Open WebUI + Ollama LXC (v7.2 — с фиксом locale warnings, декабрь 2025)
-# Добавлено: генерация en_US.UTF-8 локали перед Docker (убирает perl/apt warnings)
+# Proxmox VE — Open WebUI + Ollama LXC (v7.3 — чистая, без SearXNG, декабрь 2025)
+# Убрано: SearXNG (из-за PEP 668 в Debian 12)
+# Web Search: только DuckDuckGo (бесплатно, без ключа, работает сразу)
 # =============================================================================
 set -euo pipefail
 clear
 echo -e "\033[1;36m
-   Open WebUI + Ollama LXC (v7.2 — без locale warnings)
+   Open WebUI + Ollama LXC (v7.3 — чистая установка с Web Search)
 \033[0m\n"
 CTID=$(pvesh get /cluster/nextid)
 STORAGE="local-zfs"
@@ -33,8 +34,8 @@ pct exec "$CTID" -- bash -c '
   DEBIAN_FRONTEND=noninteractive
   apt update -y
   apt upgrade -y
-  apt install -y curl wget ca-certificates gnupg lsb-release python3 python3-pip git locales
-  # Фикс locale warnings (генерируем en_US.UTF-8 перед Docker)
+  apt install -y curl wget ca-certificates gnupg lsb-release locales
+  # Фикс locale warnings
   sed -i "s/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" /etc/locale.gen
   locale-gen
   echo "LANG=en_US.UTF-8" > /etc/default/locale
@@ -42,7 +43,7 @@ pct exec "$CTID" -- bash -c '
   export LC_ALL=en_US.UTF-8
   # Docker
   curl -fsSL https://get.docker.com | sh
-  # Остальное без изменений...
+  # Ollama
   echo "Устанавливаю Ollama v0.13.2..."
   wget -qO- "https://github.com/ollama/ollama/releases/download/v0.13.2/ollama-linux-amd64.tgz" | tar -xzf - -C /usr/local
   ln -sf /usr/local/bin/ollama /usr/bin/ollama
@@ -71,36 +72,8 @@ EOF
   done
   echo "Скачиваю модель llama3.1:8b..."
   ollama pull llama3.1:8b
-  # SearXNG (как раньше)
-  echo "Устанавливаю SearXNG..."
-  git clone https://github.com/searxng/searxng /opt/searxng
-  cd /opt/searxng
-  pip3 install -r requirements.txt
-  cp searxng/settings.yml.example searxng/settings.yml
-  sed -i "s/use_default_settings: false/use_default_settings: true/" searxng/settings.yml
-  cat > /etc/systemd/system/searxng.service << "EOF"
-[Unit]
-Description=SearXNG Search Engine
-After=network.target
-[Service]
-ExecStart=/usr/bin/python3 /opt/searxng/searxng/webapp.py
-WorkingDirectory=/opt/searxng
-Restart=always
-User=root
-Group=root
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable --now searxng
-  for i in {1..20}; do
-    if curl -s http://127.0.0.1:8888 2>/dev/null | grep -q "SearXNG"; then
-      echo "SearXNG запущен!"
-      break
-    fi
-    sleep 2
-  done
-  # Open WebUI
+  # Open WebUI с Web Search (только DuckDuckGo — работает сразу)
+  echo "Запускаю Open WebUI..."
   mkdir -p /var/lib/open-webui
   chown 1000:1000 /var/lib/open-webui
   docker run -d --network=host \
@@ -109,10 +82,21 @@ EOF
     -e ENABLE_RAG_WEB_SEARCH=true \
     -e WEB_SEARCH_PROVIDER=duckduckgo \
     -e WEB_SEARCH_DUCKDUCKGO_API_KEY="" \
-    -e WEB_SEARCH_SEARXNG_URL="http://127.0.0.1:8888" \
     --name open-webui --restart unless-stopped \
     ghcr.io/open-webui/open-webui:main
 '
 pct reboot "$CTID" &>/dev/null
-# ... (остальное как раньше)
-echo -e "\n\033[1;32mГОТОВО! Warnings с locale больше не будет.\033[0m"
+echo "Жду IP..."
+for i in {1..40}; do
+  IP=$(pct exec "$CTID" -- ip -4 addr show eth0 | grep -oP "(?<=inet )[\d.]{7,}" | head -1 || true)
+  [[ -n "$IP" ]] && break
+  sleep 3
+done
+[[ -z "$IP" ]] && IP="проверь в GUI → Summary"
+echo -e "\n\033[1;32mГОТОВО! Установка чистая, без ошибок.\033[0m"
+echo -e " → http://$IP:8080"
+echo -e " → Web Search включён по умолчанию (DuckDuckGo)"
+echo -e " → Модель llama3.1:8b готова"
+echo -e " → ID: $CTID  |  Вход: pct enter $CTID"
+echo -e " → После открытия UI: в чате нажми + → включи Web Search и спрашивай про дату!\n"
+exit 0
